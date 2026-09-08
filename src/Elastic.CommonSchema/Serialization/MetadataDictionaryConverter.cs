@@ -123,31 +123,34 @@ public class MetadataDictionaryConverter : JsonConverter<MetadataDictionary>
 			case float v:
 				{
 					writer.WritePropertyName(key);
-#if NET
-					Span<byte> buffer = stackalloc byte[32];
-					writer.WriteRawValue(TryFormatAndEnsureDecimal(v, buffer), skipInputValidation: true);
+#if NET || NETSTANDARD2_1_OR_GREATER
+					WriteFormattedNumber(writer, v);
 #else
-					writer.WriteNumberValue(v);
+					if(float.IsNaN(v) || float.IsInfinity(v))
+						writer.WriteStringValue(v.ToString(System.Globalization.CultureInfo.InvariantCulture));
+					else
+						writer.WriteNumberValue(v);
 #endif
 				}
 				break;
 			case double v:
 				{
 					writer.WritePropertyName(key);
-#if NET
-					Span<byte> buffer = stackalloc byte[32];
-					writer.WriteRawValue(TryFormatAndEnsureDecimal(v, buffer), skipInputValidation: true);
+#if NET || NETSTANDARD2_1_OR_GREATER
+					WriteFormattedNumber(writer, v);
 #else
-					writer.WriteNumberValue(v);
+					if(double.IsNaN(v) || double.IsInfinity(v))
+						writer.WriteStringValue(v.ToString(System.Globalization.CultureInfo.InvariantCulture));
+					else
+						writer.WriteNumberValue(v);
 #endif
 				}
 				break;
 			case decimal v:
 				{
 					writer.WritePropertyName(key);
-#if NET
-					Span<byte> buffer = stackalloc byte[32];
-					writer.WriteRawValue(TryFormatAndEnsureDecimal(v, buffer), skipInputValidation: true);
+#if NET || NETSTANDARD2_1_OR_GREATER
+					WriteFormattedNumber(writer, v);
 #else
 					writer.WriteNumberValue(v);
 #endif
@@ -160,7 +163,7 @@ public class MetadataDictionaryConverter : JsonConverter<MetadataDictionary>
 			case char v:
 				{
 					writer.WritePropertyName(key);
-#if NET
+#if NET || NETSTANDARD2_1_OR_GREATER
 					Span<char> buffer = [v];
 #else
 					var buffer = v.ToString();
@@ -197,47 +200,71 @@ public class MetadataDictionaryConverter : JsonConverter<MetadataDictionary>
 		}
 	}
 
-#if NET
-	private static ReadOnlySpan<byte> TryFormatAndEnsureDecimal<TDouble>(TDouble value, Span<byte> buffer) where TDouble : IUtf8SpanFormattable
+#if NET || NETSTANDARD2_1_OR_GREATER
+	private static void WriteFormattedNumber(Utf8JsonWriter writer, float value)
 	{
-		if (!value.TryFormat(buffer, out var written, default, System.Globalization.CultureInfo.InvariantCulture))
+		Span<byte> buffer = stackalloc byte[32];
+
+		if (!System.Buffers.Text.Utf8Formatter.TryFormat(value, buffer, out var written))
 			throw new InvalidOperationException("Buffer too small.");
 
+		writer.WriteRawValue(EnsureDecimal(buffer, written), skipInputValidation: true);
+	}
+
+	private static void WriteFormattedNumber(Utf8JsonWriter writer, double value)
+	{
+		Span<byte> buffer = stackalloc byte[32];
+
+		if (!System.Buffers.Text.Utf8Formatter.TryFormat(value, buffer, out var written))
+			throw new InvalidOperationException("Buffer too small.");
+
+		writer.WriteRawValue(EnsureDecimal(buffer, written), skipInputValidation: true);
+	}
+
+	private static void WriteFormattedNumber(Utf8JsonWriter writer, decimal value)
+	{
+		Span<byte> buffer = stackalloc byte[32];
+		Span<char> chars = stackalloc char[32];
+
+		if (!value.TryFormat(chars, out var written, default, System.Globalization.CultureInfo.InvariantCulture))
+			throw new InvalidOperationException("Buffer too small.");
+
+		var hasDecimalPoint = false;
+		for (var i = 0; i < written; i++)
+		{
+			hasDecimalPoint |= chars[i] == '.';
+			buffer[i] = (byte)chars[i];
+		}
+
+		if (!hasDecimalPoint)
+		{
+			// Force an explicit decimal representation.
+			buffer[written++] = (byte)'.';
+			buffer[written++] = (byte)'0';
+		}
+
+		writer.WriteRawValue(buffer[..written], skipInputValidation: true);
+	}
+
+	private static ReadOnlySpan<byte> EnsureDecimal(Span<byte> buffer, int written)
+	{
 		var span = buffer[..written];
 		if (span.IndexOfAny((byte)'.', (byte)'e', (byte)'E') >= 0)
 			return span;
 
-		var firstChar = span[0];
+		var firstChar = span.Length > 0 ? span[0] : 0;
 		if (firstChar == (byte)'N' || firstChar == (byte)'I' || (firstChar == (byte)'-' && span[1] == (byte)'I'))
 		{
 			// NaN or Infinity, wrap in quotes to make it valid JSON
 			span.CopyTo(buffer[1..]);   // Move 1 forward
 			buffer[0] = (byte)'"';
 			buffer[written + 1] = (byte)'"';
-			written += 2;
-		}
-		else
-		{
-			// Apply a decimal point
-			buffer[written++] = (byte)'.';
-			buffer[written++] = (byte)'0';
-		}
-		return buffer[..written];
-	}
-
-	private static ReadOnlySpan<byte> TryFormatAndEnsureDecimal(decimal value, Span<byte> buffer)
-	{
-		if (!value.TryFormat(buffer, out var written, default, System.Globalization.CultureInfo.InvariantCulture))
-			throw new InvalidOperationException("Buffer too small.");
-
-		var span = buffer[..written];
-
-		if (span.IndexOf((byte)'.') < 0)
-		{
-			buffer[written++] = (byte)'.';
-			buffer[written++] = (byte)'0';
+			return buffer[..(written + 2)];
 		}
 
+		// Force an explicit decimal representation.
+		buffer[written++] = (byte)'.';
+		buffer[written++] = (byte)'0';
 		return buffer[..written];
 	}
 #endif
